@@ -7,11 +7,17 @@ import (
 	"github.com/golang/protobuf/proto"
 )
 
+// KeyWithCF appends the column family name to the key
+// key = cf + "_" + key
 func KeyWithCF(cf string, key []byte) []byte {
 	return append([]byte(cf+"_"), key...)
 }
 
+//// 基础CRUD操作
+
 func GetCF(db *badger.DB, cf string, key []byte) (val []byte, err error) {
+	// db.View只读事务，不修改数据
+	// View的函数会自动处理事务的提交和回滚（自动生命周期管理）
 	err = db.View(func(txn *badger.Txn) error {
 		val, err = GetCFFromTxn(txn, cf, key)
 		return err
@@ -19,6 +25,7 @@ func GetCF(db *badger.DB, cf string, key []byte) (val []byte, err error) {
 	return
 }
 
+// 从Txn事务中获取数据
 func GetCFFromTxn(txn *badger.Txn, cf string, key []byte) (val []byte, err error) {
 	item, err := txn.Get(KeyWithCF(cf, key))
 	if err != nil {
@@ -28,12 +35,54 @@ func GetCFFromTxn(txn *badger.Txn, cf string, key []byte) (val []byte, err error
 	return
 }
 
+// 写入数据
 func PutCF(engine *badger.DB, cf string, key []byte, val []byte) error {
 	return engine.Update(func(txn *badger.Txn) error {
 		return txn.Set(KeyWithCF(cf, key), val)
 	})
 }
 
+func DeleteCF(engine *badger.DB, cf string, key []byte) error {
+	return engine.Update(func(txn *badger.Txn) error {
+		return txn.Delete(KeyWithCF(cf, key))
+	})
+}
+
+
+func DeleteRange(db *badger.DB, startKey, endKey []byte) error {
+	batch := new(WriteBatch)
+	txn := db.NewTransaction(false)
+	defer txn.Discard()
+	for _, cf := range CFs {
+		deleteRangeCF(txn, batch, cf, startKey, endKey)
+	}
+
+	return batch.WriteToDB(db)
+}
+
+func deleteRangeCF(txn *badger.Txn, batch *WriteBatch, cf string, startKey, endKey []byte) {
+	it := NewCFIterator(cf, txn)
+	for it.Seek(startKey); it.Valid(); it.Next() {
+		item := it.Item()
+		key := item.KeyCopy(nil)
+		if ExceedEndKey(key, endKey) {
+			break
+		}
+		batch.DeleteCF(cf, key)
+	}
+	defer it.Close()
+}
+
+func ExceedEndKey(current, endKey []byte) bool {
+	if len(endKey) == 0 {
+		return false
+	}
+	return bytes.Compare(current, endKey) >= 0
+}
+
+//// 元数据操作
+
+// 根据key得到value，key->value->proto.Message
 func GetMeta(engine *badger.DB, key []byte, msg proto.Message) error {
 	var val []byte
 	err := engine.View(func(txn *badger.Txn) error {
@@ -70,41 +119,4 @@ func PutMeta(engine *badger.DB, key []byte, msg proto.Message) error {
 	return engine.Update(func(txn *badger.Txn) error {
 		return txn.Set(key, val)
 	})
-}
-
-func DeleteCF(engine *badger.DB, cf string, key []byte) error {
-	return engine.Update(func(txn *badger.Txn) error {
-		return txn.Delete(KeyWithCF(cf, key))
-	})
-}
-
-func DeleteRange(db *badger.DB, startKey, endKey []byte) error {
-	batch := new(WriteBatch)
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-	for _, cf := range CFs {
-		deleteRangeCF(txn, batch, cf, startKey, endKey)
-	}
-
-	return batch.WriteToDB(db)
-}
-
-func deleteRangeCF(txn *badger.Txn, batch *WriteBatch, cf string, startKey, endKey []byte) {
-	it := NewCFIterator(cf, txn)
-	for it.Seek(startKey); it.Valid(); it.Next() {
-		item := it.Item()
-		key := item.KeyCopy(nil)
-		if ExceedEndKey(key, endKey) {
-			break
-		}
-		batch.DeleteCF(cf, key)
-	}
-	defer it.Close()
-}
-
-func ExceedEndKey(current, endKey []byte) bool {
-	if len(endKey) == 0 {
-		return false
-	}
-	return bytes.Compare(current, endKey) >= 0
 }

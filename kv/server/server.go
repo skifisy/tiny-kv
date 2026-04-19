@@ -13,6 +13,7 @@ import (
 	"github.com/pingcap/tidb/kv"
 )
 
+// 这段代码用于检查Server是否实现了tinykvpb.TinyKvServer接口，如果没有实现，编译器会报错。
 var _ tinykvpb.TinyKvServer = new(Server)
 
 // Server is a TinyKV server, it 'faces outwards', sending and receiving messages from clients such as TinySQL.
