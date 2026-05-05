@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -49,12 +50,14 @@ var ErrProposalDropped = errors.New("raft proposal dropped")
 // Config contains the parameters to start a raft.
 type Config struct {
 	// ID is the identity of the local raft. ID cannot be 0.
+	// 当前raft节点id
 	ID uint64
 
 	// peers contains the IDs of all nodes (including self) in the raft cluster. It
 	// should only be set when starting a new raft cluster. Restarting raft from
 	// previous configuration will panic if peers is set. peer is private and only
 	// used for testing right now.
+	// 节点列表（包括自己）
 	peers []uint64
 
 	// ElectionTick is the number of Node.Tick invocations that must pass between
@@ -63,21 +66,25 @@ type Config struct {
 	// candidate and start an election. ElectionTick must be greater than
 	// HeartbeatTick. We suggest ElectionTick = 10 * HeartbeatTick to avoid
 	// unnecessary leader switching.
+	// 选举超时间隔
 	ElectionTick int
 	// HeartbeatTick is the number of Node.Tick invocations that must pass between
 	// heartbeats. That is, a leader sends heartbeat messages to maintain its
 	// leadership every HeartbeatTick ticks.
+	// 心跳间隔
 	HeartbeatTick int
 
 	// Storage is the storage for raft. raft generates entries and states to be
 	// stored in storage. raft reads the persisted entries and states out of
 	// Storage when it needs. raft reads out the previous state and configuration
 	// out of storage when restarting.
+	// 持久化存储接口：持久化 Raft 核心数据：日志条目（Entries）、当前任期、已提交索引、节点配置
 	Storage Storage
 	// Applied is the last applied index. It should only be set when restarting
 	// raft. raft will not return entries to the application smaller or equal to
 	// Applied. If Applied is unset when restarting, raft might return previous
 	// applied entries. This is a very application dependent configuration.
+	// 应用层最后已应用的日志索引
 	Applied uint64
 }
 
@@ -135,6 +142,9 @@ type Raft struct {
 	heartbeatTimeout int
 	// baseline of election interval
 	electionTimeout int
+
+	randomizedElectionTimeout int // 随机选举超时时间
+
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -164,8 +174,55 @@ func newRaft(c *Config) *Raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
-	// Your Code Here (2A).
-	return nil
+
+	// 1. 从Storage中读取hardState和confState
+	hs, cs, err := c.Storage.InitialState()
+	if err != nil {
+		panic(err)
+	}
+	if len(c.peers) > 0 && len(cs.Nodes) > 0 {
+		panic("cannot specify both new peers and persisted ConfState")
+	}
+
+	r := &Raft{
+		id:               c.ID,
+		Term:             hs.Term,
+		Vote:             hs.Vote,
+		RaftLog:          newLog(c.Storage),
+		Prs:              make(map[uint64]*Progress),
+		State:            StateFollower,
+		Lead:             None,
+		heartbeatTimeout: c.HeartbeatTick,
+		electionTimeout:  c.ElectionTick,
+	}
+	peers := c.peers
+	if len(peers) == 0 {
+		peers = cs.Nodes
+	}
+
+	// 初始化：认为 所有节点都与leader同步（Next = lastIndex + 1）
+	// leader自己则认为已经完全同步（Match = lastIndex）
+	lastIndex := r.RaftLog.LastIndex()
+	for _, id := range peers {
+		r.Prs[id] = &Progress{Next: lastIndex + 1}
+	}
+	if _, ok := r.Prs[r.id]; ok {
+		r.Prs[r.id].Match = lastIndex
+		r.Prs[r.id].Next = lastIndex + 1
+	}
+
+	// r.RaftLog.committed = hs.Commit
+	// if c.Applied > 0 {
+	// 	r.RaftLog.applied = c.Applied
+	// } else if r.RaftLog.applied > r.RaftLog.committed {
+	// 	r.RaftLog.applied = r.RaftLog.committed
+	// }
+	r.resetRandomizedElectionTimeout()
+	return r
+}
+
+func (r *Raft) resetRandomizedElectionTimeout() {
+	r.randomizedElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
